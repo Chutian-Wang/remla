@@ -1,5 +1,6 @@
 import asyncio
 import json
+import datetime
 import logging
 import os
 import socket
@@ -27,8 +28,12 @@ class NoDeviceError(Exception):
 def runMethod(device, method, params):
     if hasattr(device, "cmdHandler"):
         func = getattr(device, "cmdHandler")
-        result = func(method, params, device.name)
-        return result
+        try:
+            result = func(method, params, device.name)
+            return result
+        except Exception as e:
+            logging.exception(f"Exception while running {device.name}.{method} params={params}: {e}")
+            raise
     else:
         logging.error(f"Device {device} does not have a cmdHandler method")
         raise
@@ -55,7 +60,7 @@ class Experiment(object):
         # self.jsonFile = os.path.join(self.directory, self.name + ".json")
         logging.basicConfig(
             filename=self.logPath,
-            level=logging.INFO,
+            level=logging.DEBUG,
             format="%(levelname)s - %(asctime)s - %(filename)s - %(funcName)s \r\n %(message)s \r\n",
         )
         logging.info("""
@@ -99,30 +104,36 @@ class Experiment(object):
         self.initializedStates = True
 
     async def handleConnection(self, websocket, path):
-        print("Connection!:", websocket, path)
-        self.clients.append(websocket)  # Track all clients by their WebSocket
+    logging.info(f"New websocket connection: {websocket} path={path}")
+    logging.debug(f"Connection! {websocket} {path}")
+    self.clients.append(websocket)  # Track all clients by their WebSocket
         try:
             if self.activeClient is None and self.clients:
                 self.activeClient = websocket
+                logging.info(f"Assigned active client: {websocket}")
                 await self.sendAlert(
                     websocket, "Experiment/controlStatus/1,You have control of the lab equipment."
                 )
             else:
+                logging.info(f"Connected client without control: {websocket}")
                 await self.sendAlert(
                     websocket,
                     "Experiment/controlStatus/0,You are connected but do not have control of the lab equipment.",
                 )
             async for command in websocket:
                 if websocket == self.activeClient:
+                    logging.debug(f"Received command from active client: {command}")
                     task = asyncio.create_task(self.processCommand(command, websocket))
                     task.add_done_callback(self.logException)
                 else:
+                    logging.warning(f"Client {websocket} tried to send command but is not active")
                     asyncio.create_task(
                         self.sendAlert(
                             websocket, "Experiment/controlStatus/0,You do not have control to send commands."
                         )
                     )
         finally:
+            logging.info(f"Client disconnected: {websocket}")
             self.clients.remove(websocket)  # Remove client that closed connection
             if (
                 websocket == self.activeClient
@@ -131,10 +142,11 @@ class Experiment(object):
                     self.clients[0] if len(self.clients) > 0 else None
                 )  # set the first client in the list to be the new active client
                 if self.activeClient is not None:
+                    logging.info(f"New active client assigned: {self.activeClient}")
                     await self.sendAlert(
                         self.activeClient, "Experiment/controlStatus/1,You are the new active client."
                     )
-                print("the first client has changed!")
+                logging.debug("the first client has changed!")
                 self.resetExperiment()
                 # logging.info("Looping through devices - resetting them.")
                 # for deviceName, device in self.devices.items():
@@ -143,15 +155,34 @@ class Experiment(object):
                 # logging.info("Everything reset properly!")
 
     async def processCommand(self, command, websocket):
-        print(f"Processing Command {command} from {websocket}")
-        logging.info("Processing Command - " + command)
-        deviceName, cmd, params = command.strip().split("/")
-        params = params.split(",")
+    logging.debug(f"Processing Command {command} from {websocket}")
+    logging.info("Processing Command - " + command)
+        # Parse either JSON envelope or legacy slash-format
+        try:
+            deviceName, cmd, params, req_id = self._parse_incoming(command)
+            logging.debug(f"Parsed command -> device={deviceName} cmd={cmd} params={params} id={req_id}")
+        except Exception as e:
+            logging.error(f"Failed to parse incoming command: {command} error={e}")
+            raise
         if deviceName not in self.devices:
-            print("Raising no device error")
+            logging.error(f"Raising NoDeviceError for {deviceName}")
             raise NoDeviceError(deviceName)
 
-        await self.runDeviceMethod(deviceName, cmd, params, websocket)
+        # Execute command and capture controller response
+    logging.info(f"Running device method: {deviceName}.{cmd} params={params}")
+        try:
+            response = await self.runDeviceMethod(deviceName, cmd, params, websocket)
+            logging.debug(f"Raw controller response: {response}")
+        except Exception as e:
+            logging.exception(f"Device method {deviceName}.{cmd} raised exception: {e}")
+            await self.send_structured(websocket, "error", "Experiment", topic=f"{deviceName}/{cmd}", payload={"error": str(e)}, msg_id=req_id)
+            return
+
+        # If controller returned a value, wrap and send structured response
+        if response is not None:
+            kind, topic, payload, _ = self._wrap_controller_response(response, deviceName, req_id)
+            logging.info(f"Sending structured response to client: kind={kind} topic={topic} payload={payload} id={req_id}")
+            await self.send_structured(websocket, kind, deviceName, topic, payload, msg_id=req_id)
 
     async def runDeviceMethod(self, deviceName, method, params, websocket):
         device = self.devices.get(deviceName)
@@ -160,40 +191,32 @@ class Experiment(object):
         if lockGroupName:
             async with self.lockGroups[lockGroupName]:
                 loop = asyncio.get_event_loop()
+                logging.debug(f"Acquired lock for group {lockGroupName} to run {deviceName}.{method}")
                 response = await loop.run_in_executor(
                     self.executor, runMethod, device, method, params
                 )
-                if len(response) > 1:
-                    response_type = response[0]
-                    result = response[1]
-                else:
-                    response_type = "MESSAGE"
-                    result = response[0]
+                logging.debug(f"Device method completed {deviceName}.{method} -> {response}")
+                # Return the raw controller response to be normalized by the caller
+                return response
         else:
             logging.error("All devices need a lock")
             raise
             # result = await self.runMethod(device, method, params)
-        if result is not None:
-            logging.info(f"Device {deviceName} ran {method} with result: {result}")
-            if response_type == "ALERT":
-                await self.sendAlert(websocket, f"{result}")
-            else:
-                await self.sendMessage(websocket, f"{result}")
-        else:
-            await self.sendMessage(websocket, f"{deviceName} ran {method}")
+        # unreachable; runDeviceMethod returns the controller's response when locked
 
     def startServer(self):
         # This function sets up and runs the WebSocket server indefinitely
         # loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        start_server = websockets.serve(self.handleConnection, self.host, self.port)
+    start_server = websockets.serve(self.handleConnection, self.host, self.port)
 
-        print(f"Server started at ws://{self.host}:{self.port}")
-        self.loop.run_until_complete(start_server)
+    logging.info(f"Server started at ws://{self.host}:{self.port}")
+    self.loop.run_until_complete(start_server)
         self.loop.run_forever()
 
     async def sendDataToClient(self, websocket, dataStr: str):
         try:
+            logging.debug(f"Sending raw data to client {websocket}: {dataStr}")
             await websocket.send(dataStr)
         except websockets.exceptions.ConnectionClosed:
             logging.warning(
@@ -201,17 +224,106 @@ class Experiment(object):
             )
             print(f"Failed to send message: {dataStr} - Connection was closed.")
 
-    async def sendMessage(self, websocket, message: str):
-        updatedMessage = f"MESSAGE: {message}"
-        await self.sendDataToClient(websocket, updatedMessage)
+    async def send_structured(
+        self, websocket, kind: str, source: str, topic: str = None, payload=None, msg_id=None, meta: dict = None
+    ):
+        """
+        Unified JSON envelope for messages sent to clients.
+        kind: 'message'|'alert'|'response'|'error'|'event'|'command'
+        source: origin (device name or 'Experiment')
+        topic: optional routing string (e.g. 'device/position')
+        payload: dict or string
+        msg_id: correlates to client request id
+        """
+        envelope = {
+            "type": kind,
+            "id": msg_id,
+            "source": source,
+            "topic": topic,
+            "payload": payload,
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "meta": meta or {},
+        }
+        logging.info(f"Sending structured message to {websocket}: type={kind} source={source} topic={topic} id={msg_id}")
+        await self.sendDataToClient(websocket, json.dumps(envelope))
 
-    async def sendAlert(self, websocket, alertMsg: str):
-        updatedAlertMsg = f"ALERT: {alertMsg}"
-        await self.sendDataToClient(websocket, updatedAlertMsg)
+    async def sendMessage(self, websocket, message: str, msg_id: str = None, source: str = "Experiment"):
+        await self.send_structured(websocket, "message", source, payload=message, msg_id=msg_id)
 
-    async def sendCommandToClient(self, websocket, command: str):
-        updatedCommand = f"COMMAND: {command}"
-        await self.sendDataToClient(websocket, updatedCommand)
+    async def sendAlert(self, websocket, alertMsg: str, msg_id: str = None, source: str = "Experiment"):
+        await self.send_structured(websocket, "alert", source, payload=alertMsg, msg_id=msg_id)
+
+    async def sendCommandToClient(self, websocket, command: str, msg_id: str = None, source: str = "Experiment"):
+        await self.send_structured(websocket, "command", source, payload=command, msg_id=msg_id)
+
+    def _parse_incoming(self, raw: str):
+        """
+        Accept either legacy 'Device/command/arg1,arg2' or the JSON command envelope.
+        Returns tuple (device, action, params_list, id)
+        """
+        raw = raw.strip()
+        # try JSON first
+        try:
+            obj = json.loads(raw)
+            if obj.get("type") == "command":
+                return obj.get("device"), obj.get("action"), obj.get("params", []), obj.get("id")
+        except Exception:
+            pass
+        # fallback legacy format: Device/action/arg1,arg2
+        try:
+            deviceName, cmd, params = raw.split("/", 2)
+            params_list = params.split(",") if params else []
+            return deviceName, cmd, params_list, None
+        except Exception:
+            raise ValueError("Invalid command format")
+
+    def _wrap_controller_response(self, response, device_name, request_id=None):
+        """
+        Normalize controller return values into (kind, topic, payload, request_id).
+        controller may return: ("ALERT", "Device/position/limit"), ("MESSAGE", "..."), a bare string, or a dict.
+        """
+        # Default
+        kind = "message"
+        topic = None
+        payload = None
+
+        # If controller returned a tuple/list
+        if isinstance(response, (tuple, list)):
+            if len(response) >= 2 and isinstance(response[0], str):
+                rtype = response[0]
+                content = response[1]
+            elif len(response) == 1:
+                rtype = "MESSAGE"
+                content = response[0]
+            else:
+                rtype = "MESSAGE"
+                content = response
+        elif isinstance(response, str):
+            rtype = "MESSAGE"
+            content = response
+        elif isinstance(response, dict):
+            rtype = "MESSAGE"
+            content = response
+        else:
+            rtype = "MESSAGE"
+            content = str(response)
+
+        kind_map = {"ALERT": "alert", "MESSAGE": "message", "ERROR": "error"}
+        kind = kind_map.get(rtype, "message")
+
+        # Try to extract topic/payload from slash-format strings
+        if isinstance(content, str) and "/" in content:
+            parts = content.split("/", 2)
+            if len(parts) == 3:
+                topic = "/".join(parts[:2])
+                payload = parts[2]
+            else:
+                topic = parts[0]
+                payload = "/".join(parts[1:])
+        else:
+            payload = content
+
+        return kind, topic or device_name, payload, request_id
 
     def deviceNames(self):
         names = []
@@ -314,24 +426,26 @@ class Experiment(object):
         if os.path.exists(ipc_path):
             os.unlink(ipc_path)
         ipc_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        ipc_sock.bind(ipc_path)
-        ipc_sock.listen(1)
-        print(f"IPC listener started at {ipc_path}")
+    ipc_sock.bind(ipc_path)
+    ipc_sock.listen(1)
+    logging.info(f"IPC listener started at {ipc_path}")
 
         def ipc_loop():
             while True:
                 conn, _ = ipc_sock.accept()
                 data = conn.recv(1024).decode().strip()
                 if data in ["boot", "contact"]:
-                    # Send message to active client
+                    # Send message to active client as structured JSON
+                    logging.info(f"IPC received event '{data}'")
                     if self.activeClient:
                         future = asyncio.run_coroutine_threadsafe(
-                            self.sendAlert(self.activeClient, f"Experiment/message/{data}"),
-                            self.loop
+                            self.send_structured(self.activeClient, "event", "Experiment", topic=f"message/{data}", payload={"msg": data}),
+                            self.loop,
                         )
-                        print(f"Sent {data} message to active client.")
+                        logging.debug(f"Sent {data} message to active client.")
                     else:
-                        print(f"No active client to send {data} message.")
+                        logging.info(f"No active client to send IPC event '{data}'")
+                        logging.debug(f"No active client to send {data} message.")
                 conn.close()
 
 

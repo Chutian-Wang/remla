@@ -6,7 +6,7 @@ import os
 APP_NAME = "remla"
 hostname = socket.gethostname()
 packagesToCheck = ["nginx", "python3-pip", "i2c-tools", "pigpio"]
-
+RUN_MARKER = Path("/run/remla_camera_cycled")
 
 
 

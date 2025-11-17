@@ -131,6 +131,13 @@ def init():
 
     interactivesetup()
     typer.echo("Wrapping up install...")
+    # perform initial camera cycling once per boot (if configured)
+    try:
+        if not RUN_MARKER.exists():
+            rprint("Performing initial camera cycle (first-time this boot)...")
+            cycle_initialize_cameras(timeout_per_camera=4)
+    except Exception as e:
+        warning(f"Initial camera cycling failed or skipped: {e}")
     subprocess.run(["sudo", "systemctl", "daemon-reload"])
     subprocess.run(["sudo", "systemctl", "restart", "remla.service"])
     enable_service("remla")
@@ -513,6 +520,14 @@ def run(
         asyncio.get_event_loop().run_forever()
     elif not foreground:
         try:
+            # perform initial camera cycling once per boot (if configured)
+            try:
+                if not RUN_MARKER.exists():
+                    rprint("Performing initial camera cycle (per‑boot) before starting service...")
+                    cycle_initialize_cameras(timeout_per_camera=4)
+            except Exception:
+                # non-fatal — continue to start the service
+                pass
             subprocess.run(["systemctl", "start", "remla.service"], check=True)
             success("Running remla in background!")
         except subprocess.CalledProcessError as e:

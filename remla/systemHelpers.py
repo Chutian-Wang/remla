@@ -5,6 +5,7 @@ import os
 import functools
 import typer
 import sys
+import time
 
 from remla.typerHelpers import *
 from pathlib import Path
@@ -17,6 +18,9 @@ from contextlib import contextmanager
 from typing import Callable
 from remla.customvalidators import *
 from remla.yaml import yaml
+
+ARDUCAM_I2C_ADDR = "0x70"
+ARDUCAM_CHANNEL_BYTES = [0x04, 0x05, 0x06, 0x07]  # index 0->a,1->b,2->c,3->d
 
 def is_package_installed(package_name):
     try:
@@ -256,18 +260,109 @@ def bothOrNoneAssigned(x, y):
     else:
         return False
 
-# def runAsUser(nonPrivilegedUid=1000):
-#     def decoratorRunAsUser(func):
-#         @functools.wraps(func)
-#         def wrapperRunAsUser(*args, **kwargs):
-#             currentUid = os.geteuid()
-#             try:
-#                 # Switch to non-privileged user
-#                 os.seteuid(nonPrivilegedUid)
-#                 result = func(*args, **kwargs)
-#             finally:
-#                 # Always switch back to the original user
-#                 os.seteuid(currentUid)
-#             return result
-#         return wrapperRunAsUser
-#     return decoratorRunAsUser
+def select_arducam_channel_index(index: int, bus: int = 1) -> bool:
+    """
+    Select channel by zero-based index (0=a,1=b,2=c,3=d) using the same i2c bytes
+    used by ArduCamMultiCamera.camerai2c.
+    Returns True on success.
+    """
+    if index < 0 or index >= len(ARDUCAM_CHANNEL_BYTES):
+        return False
+    val = ARDUCAM_CHANNEL_BYTES[index]
+    try:
+        subprocess.run(
+            ["i2cset", "-y", str(bus), ARDUCAM_I2C_ADDR, "0x00", f"0x{val:02x}"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # small delay to let hardware settle
+        time.sleep(0.1)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        warning(f"Failed to write i2c for Arducam channel {index}: {e}")
+        return False
+
+
+
+def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
+    """
+    Use the saved camera config (settings.yml -> 'camera') to cycle cameras.
+    For each configured camera port:
+      - select that mux channel
+      - start remla.service
+      - wait timeout_per_camera seconds
+      - stop remla.service
+
+    Guarding:
+    - create RUN_MARKER immediately to avoid re-entry when systemctl starts the same binary
+    - if remla.service is already active, skip cycling (avoid disrupting a live service)
+    """
+    # If we've already run this boot, skip
+    if RUN_MARKER.exists():
+        rprint("Camera cycle already performed this boot; skipping.")
+        return
+
+    # Create the marker immediately to prevent re-entry while we start/stop the service
+    try:
+        RUN_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        RUN_MARKER.write_text("in-progress")
+    except Exception as e:
+        warning(f"Could not write /run marker: {e}")
+        # continue anyway, but risk re-entry
+
+    # If the service is already running, don't try to start/stop it here (avoid recursion/disruption)
+    try:
+        svc_active = subprocess.run(
+            ["systemctl", "is-active", "--quiet", "remla.service"]
+        ).returncode == 0
+    except Exception:
+        svc_active = False
+
+    if svc_active:
+        warning("remla.service is already active; skipping camera cycling to avoid disrupting service.")
+        return
+
+    # load camera config
+    try:
+        settings_path = settingsDirectory / "settings.yml"
+        settings = yaml.load(settings_path) or {}
+    except Exception as e:
+        warning(f"Unable to load settings to cycle cameras: {e}")
+        return
+
+    device_settings = settings.get("devices", {})
+    camera_cfg = None
+    for device in device_settings.values():
+        if device.get("type") == "ArduCamMultiCamera":
+            camera_cfg = device
+            break
+    if camera_cfg is None:
+        return  # No ArduCamMultiCamera device configured
+
+    numCameras = camera_cfg.get("numCameras", 0)
+    bus = camera_cfg.get("i2cbus", 1)
+
+    if not numCameras:
+        warning("No cameras configured in settings; skipping camera cycling.")
+        return
+
+    rprint(f"Cycling {numCameras} configured camera(s)...")
+
+    for ch in range(numCameras):
+        rprint(f"Initializing camera on channel {ch}...")
+        if not select_arducam_channel_index(ch, bus=bus):
+            warning(f"Skipping channel {ch} because selection failed.")
+            continue
+        time.sleep(0.5)
+        try:
+            subprocess.run(["systemctl", "start", "remla.service"], check=True)
+            time.sleep(timeout_per_camera)
+            subprocess.run(["systemctl", "stop", "remla.service"], check=True)
+            time.sleep(0.2)
+        except subprocess.CalledProcessError as e:
+            warning(f"Error while cycling remla for channel {ch}: {e}")
+            continue
+
+    success("Completed configured camera cycling.")
+    # leave RUN_MARKER in place (per-boot marker)

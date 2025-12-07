@@ -239,7 +239,7 @@ After=network.target
 User={user}
 Group={user}
 WorkingDirectory={remoteLabsDirectory}
-ExecStart={executablePath} run {"-w" if echo else ""} -f
+ExecStart={executablePath} run {"-w" if echo else ""}
 ExecStartPre=/bin/sleep 5
 Restart=always
 Environment="PATH={binPath}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
@@ -381,22 +381,6 @@ def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
     - if remla.service is already active, skip cycling (avoid disrupting a live service)
     """
     logger = get_camera_logger()
-    current_boot = int(psutil.boot_time())
-    # If we've already run this boot, skip
-    if runMarker.exists():
-        boot_record = int(runMarker.read_text().strip())
-        if boot_record != current_boot:
-            logger.info("New boot detected (was %s, now %s); proceeding with camera cycle.", boot_record, current_boot)
-        else:
-            logger.info("Camera cycle already performed this boot; skipping.")
-            return
-
-    # Create the marker immediately to prevent re-entry while we start/stop services
-    try:
-        runMarker.parent.mkdir(parents=True, exist_ok=True)
-        runMarker.write_text(str(current_boot))
-    except Exception as e:
-        logger.warning("Could not write runMarker: %s", e)
 
     # If remla.service is active, avoid cycling to not disrupt a running instance
     try:
@@ -475,5 +459,23 @@ def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
 
     logger.info("Completed configured camera cycling.")
 
-
+def get_boot_status() -> bool:
+    """
+    Check if the system has been rebooted since the last recorded boot time.
+    Returns True if the system has rebooted, False otherwise.
+    """
+    current_boot = int(psutil.boot_time())
+    # If we've already run this boot, skip
+    boot_record = int(runMarker.read_text().strip())
+    logger = get_camera_logger()
+    if runMarker.exists():
+        if boot_record != current_boot:
+            logger.info("New boot detected (was %s, now %s)", boot_record, current_boot)
+            runMarker.write_text(str(current_boot))
+            return True
+        else:
+            logger.info("No new boot detected (still %s)", current_boot)
+            return False
+    logger.error("Boot record file missing; assuming reboot.")
+    return True
 

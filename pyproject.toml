@@ -12,6 +12,7 @@ remla = "remla.main:app"
 [tool.poetry.dependencies]
 python = "^3.11"
 typer = {extras = ["all"], version = "^0.12.1"}
+click = ">=8.1.3,<8.2"
 ruamel-yaml = "^0.18.6"
 rpistepper = "^0.3a1"
 pyvisa = "^1.14.1"

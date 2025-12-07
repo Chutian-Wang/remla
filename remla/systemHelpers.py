@@ -35,14 +35,14 @@ def get_camera_logger() -> logging.Logger:
     Creates the logs directory if needed and ensures the handler isn't duplicated.
     """
     logger = logging.getLogger("remla.camera_cycle")
-    info("Making camera cycle logger")
+    rprint("Making camera cycle logger")
     if not logger.handlers:
         handler = logging.FileHandler(logsDirectory / "camera_cycle.log")
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.setLevel(logging.DEBUG)
-    info("Camera cycle logger ready")
+    rprint("Camera cycle logger ready")
     return logger
 
 def is_package_installed(package_name):
@@ -291,7 +291,7 @@ def select_arducam_channel_index(index: int, bus: int = 1, control_pins: list | 
     Returns True on success.
     """
     logger = get_camera_logger()
-    info("Using camera logger")
+    rprint("Using camera logger")
     if index < 0 or index >= len(ARDUCAM_CHANNEL_BYTES):
         warning("select_arducam_channel_index: invalid index %s", index)
         logger.error("select_arducam_channel_index: invalid index %s", index)

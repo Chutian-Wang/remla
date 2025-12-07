@@ -6,6 +6,7 @@ import functools
 import typer
 import sys
 import time
+import psutil
 
 from remla.typerHelpers import *
 from pathlib import Path
@@ -288,7 +289,7 @@ def bothOrNoneAssigned(x, y):
     else:
         return False
 
-def select_arducam_channel_index(index: int, bus: int = 1) -> bool:
+def select_arducam_channel_index(index: int, bus: int = 1, control_pins: list | None = None) -> bool:
     """
     Select channel by zero-based index (0=a,1=b,2=c,3=d) using the same i2c bytes
     used by ArduCamMultiCamera.camerai2c.
@@ -310,13 +311,13 @@ def select_arducam_channel_index(index: int, bus: int = 1) -> bool:
     }
     sel_vals = pin_map.get(index)
 
-    # Try pigpio first for GPIO writes
+    # Try pigpio first for GPIO writes (only if control_pins provided)
     wrote_gpio = False
     try:
         pi = pigpio.pi()
-        if pi and pi.connected and 'ARDUCAM_CONTROL_PINS' in globals():
-            pins = globals().get('ARDUCAM_CONTROL_PINS')
-            if pins and len(pins) >= 3:
+        pins = control_pins
+        if pins and pi and getattr(pi, "connected", False):
+            if len(pins) >= 3:
                 for pin, out in zip(pins[:3], sel_vals):
                     try:
                         pi.set_mode(int(pin), pigpio.OUTPUT)
@@ -331,10 +332,10 @@ def select_arducam_channel_index(index: int, bus: int = 1) -> bool:
         logger.exception("pigpio attempt failed")
 
     # Fallback to RPi.GPIO if pigpio not available
-    if not wrote_gpio and rpi_gpio is not None and 'ARDUCAM_CONTROL_PINS' in globals():
+    if not wrote_gpio and rpi_gpio is not None and control_pins:
         try:
-            pins = globals().get('ARDUCAM_CONTROL_PINS')
-            if pins and len(pins) >= 3:
+            pins = control_pins
+            if len(pins) >= 3:
                 rpi_gpio.setmode(rpi_gpio.BCM)
                 for pin, out in zip(pins[:3], sel_vals):
                     rpi_gpio.setup(int(pin), rpi_gpio.OUT)
@@ -376,22 +377,26 @@ def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
       - stop remla.service
 
     Guarding:
-    - create RUN_MARKER immediately to avoid re-entry when systemctl starts the same binary
+    - create runMarker immediately to avoid re-entry when systemctl starts the same binary
     - if remla.service is already active, skip cycling (avoid disrupting a live service)
     """
     logger = logging.getLogger("remla.camera_cycle")
-
+    current_boot = int(psutil.boot_time())
     # If we've already run this boot, skip
-    if RUN_MARKER.exists():
-        logger.info("Camera cycle already performed this boot; skipping.")
-        return
+    if runMarker.exists():
+        boot_record = int(runMarker.read_text().strip())
+        if boot_record != current_boot:
+            logger.info("New boot detected (was %s, now %s); proceeding with camera cycle.", boot_record, current_boot)
+        else:
+            logger.info("Camera cycle already performed this boot; skipping.")
+            return
 
     # Create the marker immediately to prevent re-entry while we start/stop services
     try:
-        RUN_MARKER.parent.mkdir(parents=True, exist_ok=True)
-        RUN_MARKER.write_text("in-progress")
+        runMarker.parent.mkdir(parents=True, exist_ok=True)
+        runMarker.write_text(str(current_boot))
     except Exception as e:
-        logger.warning("Could not write RUN_MARKER: %s", e)
+        logger.warning("Could not write runMarker: %s", e)
 
     # If remla.service is active, avoid cycling to not disrupt a running instance
     try:
@@ -440,9 +445,7 @@ def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
     numCameras = camera_cfg.get("numCameras", 0)
     bus = camera_cfg.get("i2cbus", 1)
     # accept multiple possible key names for control pins; keep backwards compat
-    control_pins = camera_cfg.get("controlPins") or camera_cfg.get("controlPins", camera_cfg.get("controlPins"))
-    if control_pins:
-        globals()['ARDUCAM_CONTROL_PINS'] = control_pins
+    control_pins = camera_cfg.get("controlPins") or camera_cfg.get("control_pins")
 
     if not numCameras:
         logger.info("No cameras configured (numCameras==0); skipping camera cycling.")
@@ -452,7 +455,7 @@ def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
 
     for ch in range(numCameras):
         logger.info("Initializing camera on channel %s...", ch)
-        ok = select_arducam_channel_index(ch, bus=bus)
+        ok = select_arducam_channel_index(ch, bus=bus, control_pins=control_pins)
         if not ok:
             logger.warning("Skipping channel %s because selection failed.", ch)
             continue
@@ -471,4 +474,6 @@ def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
         time.sleep(timeout_per_camera)
 
     logger.info("Completed configured camera cycling.")
-    # leave RUN_MARKER in place (per-boot marker)
+
+
+

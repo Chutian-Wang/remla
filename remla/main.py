@@ -27,7 +27,7 @@ from remla.yaml import createDevicesFromYml, yaml
 
 from .customvalidators import *
 
-__version__ = "0.2.7dev4"
+__version__ = "0.2.7dev5"
 
 
 def version_callback(value: bool):
@@ -133,7 +133,7 @@ def init():
     typer.echo("Wrapping up install...")
     # perform initial camera cycling once per boot (if configured)
     try:
-        if not RUN_MARKER.exists():
+        if not runMarker.exists():
             rprint("Performing initial camera cycle (first-time this boot)...")
             cycle_initialize_cameras(timeout_per_camera=4)
     except Exception as e:
@@ -521,13 +521,8 @@ def run(
     elif not foreground:
         try:
             # perform initial camera cycling once per boot (if configured)
-            try:
-                if not RUN_MARKER.exists():
-                    rprint("Performing initial camera cycle (per‑boot) before starting service...")
-                    cycle_initialize_cameras(timeout_per_camera=4)
-            except Exception:
-                # non-fatal — continue to start the service
-                pass
+            rprint("Performing initial camera cycle (per‑boot) before starting service...")
+            cycle_initialize_cameras(timeout_per_camera=4)
             subprocess.run(["systemctl", "start", "remla.service"], check=True)
             success("Running remla in background!")
         except subprocess.CalledProcessError as e:

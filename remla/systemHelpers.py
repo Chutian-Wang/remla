@@ -249,7 +249,8 @@ Restart=always
 Environment="PATH={binPath}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 StandardOutput=append:/var/log/remla.log
 StandardError=append:/var/log/remla.log
-
+RuntimeDirectory=remla
+RuntimeDirectoryMode=0755
 
 [Install]
 WantedBy=multi-user.target

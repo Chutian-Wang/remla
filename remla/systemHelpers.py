@@ -34,16 +34,9 @@ def get_camera_logger() -> logging.Logger:
     """Return a configured logger that writes to `logsDirectory / 'camera_cycle.log'`.
     Creates the logs directory if needed and ensures the handler isn't duplicated.
     """
-    log_path = logsDirectory
-    try:
-        log_path.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        # If we cannot create logs directory, fall back to current dir
-        log_path = Path(".")
-
-    logger = get_camera_logger()
+    logger = logging.getLogger("remla.camera_cycle")
     if not logger.handlers:
-        handler = logging.FileHandler(log_path / "camera_cycle.log")
+        handler = logging.FileHandler(logsDirectory / "camera_cycle.log")
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)

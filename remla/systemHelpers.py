@@ -35,12 +35,14 @@ def get_camera_logger() -> logging.Logger:
     Creates the logs directory if needed and ensures the handler isn't duplicated.
     """
     logger = logging.getLogger("remla.camera_cycle")
+    info("Making camera cycle logger")
     if not logger.handlers:
         handler = logging.FileHandler(logsDirectory / "camera_cycle.log")
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
+    info("Camera cycle logger ready")
     return logger
 
 def is_package_installed(package_name):
@@ -289,7 +291,9 @@ def select_arducam_channel_index(index: int, bus: int = 1, control_pins: list | 
     Returns True on success.
     """
     logger = get_camera_logger()
+    info("Using camera logger")
     if index < 0 or index >= len(ARDUCAM_CHANNEL_BYTES):
+        warning("select_arducam_channel_index: invalid index %s", index)
         logger.error("select_arducam_channel_index: invalid index %s", index)
         return False
 
@@ -307,12 +311,14 @@ def select_arducam_channel_index(index: int, bus: int = 1, control_pins: list | 
     # Try pigpio first for GPIO writes (only if control_pins provided)
     wrote_gpio = False
     try:
+        logger.info("Attempting to use pigpio for GPIO control")
         pi = pigpio.pi()
         pins = control_pins
         if pins and pi and getattr(pi, "connected", False):
             if len(pins) >= 3:
                 for pin, out in zip(pins[:3], sel_vals):
                     try:
+                        logger.info("Setting pigpio pin %s to %s", pin, out)
                         pi.set_mode(int(pin), pigpio.OUTPUT)
                         pi.write(int(pin), int(out))
                     except Exception:
@@ -326,6 +332,7 @@ def select_arducam_channel_index(index: int, bus: int = 1, control_pins: list | 
 
     # Fallback to RPi.GPIO if pigpio not available
     if not wrote_gpio and rpi_gpio is not None and control_pins:
+        logger.info("Attempting to use RPi.GPIO for GPIO control")
         try:
             pins = control_pins
             if len(pins) >= 3:
@@ -373,7 +380,7 @@ def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
     - create runMarker immediately to avoid re-entry when systemctl starts the same binary
     - if remla.service is already active, skip cycling (avoid disrupting a live service)
     """
-    logger = logging.getLogger("remla.camera_cycle")
+    logger = get_camera_logger()
     current_boot = int(psutil.boot_time())
     # If we've already run this boot, skip
     if runMarker.exists():

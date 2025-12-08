@@ -524,11 +524,9 @@ def run(
             cycle_camera = get_boot_status()
             if cycle_camera:
                 rprint("Performing initial camera cycle (per‑boot) before starting service...")
-                logger.info("Performing initial camera cycle (per‑boot) before starting service...")
                 cycle_initialize_cameras(timeout_per_camera=4)
             else:
                 rprint("Skipping initial camera cycle (already performed this boot).")
-                logger.info("Skipping initial camera cycle (already performed this boot).")
             subprocess.run(["systemctl", "start", "remla.service"], check=True)
             success("Running remla in background!")
             subprocess.run(["systemctl", "restart", "mediamtx.service"], check=True)

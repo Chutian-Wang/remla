@@ -600,6 +600,7 @@ def run(
                 raise typer.Abort()
         # Placeholder for further experiment execution logic
         success("Experiment setup complete.")
+        get_boot_status()
         experiment.startServer()
 
 

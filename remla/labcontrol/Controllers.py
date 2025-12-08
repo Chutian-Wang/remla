@@ -1442,9 +1442,9 @@ class ArduCamMultiCamera(BaseController):
 
         # Set camera for A
         _cameraNames = ["a", "b", "c", "d"]
-        for i in range(self.numCameras):
-            self.camera(_cameraNames[i])
-            time.sleep(5)
+        # for i in range(self.numCameras):
+        #     self.camera(_cameraNames[i])
+        #     time.sleep(5)
         if initialCamera in _cameraNames:
             self.camera(initialCamera)
         else:

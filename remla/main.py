@@ -27,7 +27,7 @@ from remla.yaml import createDevicesFromYml, yaml
 
 from .customvalidators import *
 
-__version__ = "0.2.6dev0"
+__version__ = "0.2.7dev8"
 
 
 def version_callback(value: bool):
@@ -131,6 +131,13 @@ def init():
 
     interactivesetup()
     typer.echo("Wrapping up install...")
+    # perform initial camera cycling once per boot (if configured)
+    try:
+        if not runMarker.exists():
+            rprint("Performing initial camera cycle (first-time this boot)...")
+            cycle_initialize_cameras(timeout_per_camera=4)
+    except Exception as e:
+        warning(f"Initial camera cycling failed or skipped: {e}")
     subprocess.run(["sudo", "systemctl", "daemon-reload"])
     subprocess.run(["sudo", "systemctl", "restart", "remla.service"])
     enable_service("remla")
@@ -499,7 +506,19 @@ def run(
         raise typer.Abort()
     signal.signal(signal.SIGTERM, lambda signum, frame: cleanupPID())
     signal.signal(signal.SIGINT, lambda signum, frame: cleanupPID())
-
+    # perform initial camera cycling once per boot (if configured)
+    cycle_camera = get_boot_status()
+    logger = get_camera_logger()
+    if cycle_camera:
+        rprint("Performing initial camera cycle (per‑boot) before starting service...") 
+        logger.info("""
+        ##############################################################
+        ####                Starting New Log                      ####
+        ##############################################################    
+        """)
+        cycle_initialize_cameras(timeout_per_camera=4)
+    else:
+        rprint("Skipping initial camera cycle (already performed this boot).")
     if wstest:
         print("Starting Echo Server")
 
@@ -515,6 +534,7 @@ def run(
         try:
             subprocess.run(["systemctl", "start", "remla.service"], check=True)
             success("Running remla in background!")
+            subprocess.run(["systemctl", "restart", "mediamtx.service"], check=True)
         except subprocess.CalledProcessError as e:
             alert(f"Failed to start remla due to {e}")
             raise typer.Abort()
@@ -580,6 +600,7 @@ def run(
                 raise typer.Abort()
         # Placeholder for further experiment execution logic
         success("Experiment setup complete.")
+        get_boot_status()
         experiment.startServer()
 
 

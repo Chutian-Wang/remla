@@ -9,7 +9,6 @@ packagesToCheck = ["nginx", "python3-pip", "i2c-tools", "pigpio"]
 
 
 
-
 ###### List of important paths (for now)
 mediaMTX_tar_file = "https://github.com/bluenviron/mediamtx/releases/download/v1.9.3/mediamtx_v1.9.3_linux_arm64v8.tar.gz"
 mediamtxVersion = "1.9.3"
@@ -35,3 +34,5 @@ websiteStaticDirectory = websiteDirectory / "static"
 websiteJSDirectory = websiteStaticDirectory / "js"
 websiteCSSDirectory = websiteStaticDirectory / "css"
 websiteImgsDirectory = websiteStaticDirectory / "imgs"
+
+runMarker = settingsDirectory / "remla_camera_cycled" 

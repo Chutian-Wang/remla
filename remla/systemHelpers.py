@@ -5,9 +5,17 @@ import os
 import functools
 import typer
 import sys
+import time
+import psutil
 
 from remla.typerHelpers import *
 from pathlib import Path
+import logging
+import pigpio
+try:
+    import RPi.GPIO as rpi_gpio
+except Exception:
+    rpi_gpio = None
 from rich.progress import track
 from rich.prompt import IntPrompt
 import shutil
@@ -17,6 +25,23 @@ from contextlib import contextmanager
 from typing import Callable
 from remla.customvalidators import *
 from remla.yaml import yaml
+
+ARDUCAM_I2C_ADDR = "0x70"
+ARDUCAM_CHANNEL_BYTES = [0x04, 0x05, 0x06, 0x07]  # index 0->a,1->b,2->c,3->d
+
+
+def get_camera_logger() -> logging.Logger:
+    """Return a configured logger that writes to `logsDirectory / 'camera_cycle.log'`.
+    Creates the logs directory if needed and ensures the handler isn't duplicated.
+    """
+    logger = logging.getLogger("remla.camera_cycle")
+    if not logger.handlers:
+        handler = logging.FileHandler(logsDirectory / "camera_cycle.log")
+        formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+    return logger
 
 def is_package_installed(package_name):
     try:
@@ -218,7 +243,8 @@ Restart=always
 Environment="PATH={binPath}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 StandardOutput=append:/var/log/remla.log
 StandardError=append:/var/log/remla.log
-
+RuntimeDirectory=remla
+RuntimeDirectoryMode=0755
 
 [Install]
 WantedBy=multi-user.target
@@ -256,18 +282,199 @@ def bothOrNoneAssigned(x, y):
     else:
         return False
 
-# def runAsUser(nonPrivilegedUid=1000):
-#     def decoratorRunAsUser(func):
-#         @functools.wraps(func)
-#         def wrapperRunAsUser(*args, **kwargs):
-#             currentUid = os.geteuid()
-#             try:
-#                 # Switch to non-privileged user
-#                 os.seteuid(nonPrivilegedUid)
-#                 result = func(*args, **kwargs)
-#             finally:
-#                 # Always switch back to the original user
-#                 os.seteuid(currentUid)
-#             return result
-#         return wrapperRunAsUser
-#     return decoratorRunAsUser
+def select_arducam_channel_index(index: int, bus: int = 1, control_pins: list | None = None) -> bool:
+    """
+    Select channel by zero-based index (0=a,1=b,2=c,3=d) using the same i2c bytes
+    used by ArduCamMultiCamera.camerai2c.
+    Returns True on success.
+    """
+    logger = get_camera_logger()
+    if index < 0 or index >= len(ARDUCAM_CHANNEL_BYTES):
+        logger.error("select_arducam_channel_index: invalid index %s", index)
+        return False
+
+    val = ARDUCAM_CHANNEL_BYTES[index]
+
+    # Map index -> gpio outputs (SEL, EN1, EN2) as ints (0/1)
+    pin_map = {
+        0: (0, 0, 1),
+        1: (1, 0, 1),
+        2: (0, 1, 0),
+        3: (1, 1, 0),
+    }
+    sel_vals = pin_map.get(index)
+
+    # Try pigpio first for GPIO writes (only if control_pins provided)
+    wrote_gpio = False
+    try:
+        logger.info("Attempting to use pigpio for GPIO control")
+        pi = pigpio.pi()
+        pins = control_pins
+        if pins and pi and getattr(pi, "connected", False):
+            if len(pins) >= 3:
+                for pin, out in zip(pins[:3], sel_vals):
+                    try:
+                        logger.info("Setting pigpio pin %s to %s", pin, out)
+                        pi.set_mode(int(pin), pigpio.OUTPUT)
+                        pi.write(int(pin), int(out))
+                    except Exception:
+                        logger.exception("pigpio write failed for pin %s", pin)
+                wrote_gpio = True
+        else:
+            if not pi or not getattr(pi, 'connected', False):
+                logger.debug("pigpio not connected; will try RPi.GPIO fallback if available")
+    except Exception:
+        logger.exception("pigpio attempt failed")
+
+    # Fallback to RPi.GPIO if pigpio not available
+    if not wrote_gpio and rpi_gpio is not None and control_pins:
+        logger.info("Attempting to use RPi.GPIO for GPIO control")
+        try:
+            pins = control_pins
+            if len(pins) >= 3:
+                rpi_gpio.setmode(rpi_gpio.BCM)
+                for pin, out in zip(pins[:3], sel_vals):
+                    rpi_gpio.setup(int(pin), rpi_gpio.OUT)
+                    rpi_gpio.output(int(pin), rpi_gpio.HIGH if out else rpi_gpio.LOW)
+                wrote_gpio = True
+                logger.info("Used RPi.GPIO fallback to set control pins %s", pins[:3])
+        except Exception:
+            logger.exception("RPi.GPIO fallback failed")
+
+    # Perform I2C mux switch via i2cset (explicit external tool as requested)
+    try:
+        subprocess.run([
+            "i2cset",
+            "-y",
+            str(bus),
+            ARDUCAM_I2C_ADDR,
+            "0x00",
+            f"0x{val:02x}",
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.1)
+        logger.info("Selected ArduCam channel %s (i2c 0x%02x) wrote_gpio=%s", index, val, wrote_gpio)
+        return True
+    except FileNotFoundError:
+        logger.error("i2cset not found; install i2c-tools")
+        return False
+    except subprocess.CalledProcessError as e:
+        logger.exception("i2cset failed: %s", e)
+        return False
+
+
+
+def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
+    """
+    Use the saved camera config (settings.yml -> 'camera') to cycle cameras.
+    For each configured camera port:
+      - select that mux channel
+      - start remla.service
+      - wait timeout_per_camera seconds
+      - stop remla.service
+
+    Guarding:
+    - create runMarker immediately to avoid re-entry when systemctl starts the same binary
+    - if remla.service is already active, skip cycling (avoid disrupting a live service)
+    """
+    logger = get_camera_logger()
+
+    # # If remla.service is active, avoid cycling to not disrupt a running instance
+    # try:
+    #     remla_active = subprocess.run(["systemctl", "is-active", "--quiet", "remla.service"]).returncode == 0
+    # except Exception:
+    #     remla_active = False
+
+    # if remla_active:
+    #     logger.warning("remla.service is already active; skipping camera cycling to avoid disrupting service.")
+    #     return
+
+    # load top-level settings and find current lab
+    try:
+        settings_path = settingsDirectory / "settings.yml"
+        settings = yaml.load(settings_path) or {}
+    except Exception as e:
+        logger.exception("Unable to load settings.yml: %s", e)
+        return
+
+    current_lab = settings.get("currentLab")
+    if not current_lab:
+        logger.info("No currentLab configured in settings.yml; skipping camera cycling.")
+        return
+
+    lab_path = remoteLabsDirectory / current_lab
+    if not lab_path.exists():
+        logger.warning("Lab settings file %s not found; skipping camera cycling.", lab_path)
+        return
+
+    try:
+        lab_settings = yaml.load(lab_path)
+    except Exception as e:
+        logger.exception("Unable to load lab settings %s: %s", lab_path, e)
+        return
+
+    device_settings = lab_settings.get("devices", {})
+    camera_cfg = None
+    for device in device_settings.values():
+        if device.get("type") == "ArduCamMultiCamera":
+            camera_cfg = device
+            break
+    if camera_cfg is None:
+        logger.info("No ArduCamMultiCamera device configured in lab settings; skipping camera cycling.")
+        return
+
+    numCameras = camera_cfg.get("numCameras", 0)
+    bus = camera_cfg.get("i2cbus", 1)
+    # accept multiple possible key names for control pins; keep backwards compat
+    control_pins = camera_cfg.get("controlPins") or camera_cfg.get("control_pins")
+
+    if not numCameras:
+        logger.info("No cameras configured (numCameras==0); skipping camera cycling.")
+        return
+
+    logger.info("Cycling %s configured camera(s)...", numCameras)
+
+    for ch in range(numCameras):
+        logger.info("Initializing camera on channel %s...", ch)
+        ok = select_arducam_channel_index(ch, bus=bus, control_pins=control_pins)
+        if not ok:
+            logger.warning("Skipping channel %s because selection failed.", ch)
+            continue
+
+        # hardware settle time (match original script)
+        time.sleep(2)
+
+        # restart mediamtx (matches working bash script provided)
+        try:
+            subprocess.run(["systemctl", "restart", "mediamtx"], check=True)
+            logger.info("Restarted mediamtx for channel %s", ch)
+        except subprocess.CalledProcessError as e:
+            logger.exception("Failed to restart mediamtx for channel %s: %s", ch, e)
+            continue
+
+        time.sleep(timeout_per_camera)
+
+    logger.info("Completed configured camera cycling.")
+
+def get_boot_status() -> bool:
+    """
+    Check if the system has been rebooted since the last recorded boot time.
+    Returns True if the system has rebooted, False otherwise.
+    """
+    current_boot = int(psutil.boot_time())
+    # If we've already run this boot, skip
+    logger = get_camera_logger()
+    if runMarker.exists():
+        boot_record = int(runMarker.read_text().strip())
+        if boot_record != current_boot:
+            logger.info("New boot detected (was %s, now %s)", boot_record, current_boot)
+            runMarker.write_text(str(current_boot))
+            return True
+        else:
+            logger.info("No new boot detected (still %s)", current_boot)
+            return False
+    else:
+        runMarker.mkdir(parents=True, exist_ok=True)
+        runMarker.write_text(str(current_boot))
+        logger.error("Boot record file missing; assuming reboot.")
+        return True
+

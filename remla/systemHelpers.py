@@ -473,7 +473,7 @@ def get_boot_status() -> bool:
             logger.info("No new boot detected (still %s)", current_boot)
             return False
     else:
-        runMarker.mkdir(parents=True, exist_ok=True)
+        runMarker.touch(exist_ok=True)
         runMarker.write_text(str(current_boot))
         logger.error("Boot record file missing; assuming reboot.")
         return True

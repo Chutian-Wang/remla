@@ -378,15 +378,15 @@ def cycle_initialize_cameras(timeout_per_camera: int = 4) -> None:
     """
     logger = get_camera_logger()
 
-    # If remla.service is active, avoid cycling to not disrupt a running instance
-    try:
-        remla_active = subprocess.run(["systemctl", "is-active", "--quiet", "remla.service"]).returncode == 0
-    except Exception:
-        remla_active = False
+    # # If remla.service is active, avoid cycling to not disrupt a running instance
+    # try:
+    #     remla_active = subprocess.run(["systemctl", "is-active", "--quiet", "remla.service"]).returncode == 0
+    # except Exception:
+    #     remla_active = False
 
-    if remla_active:
-        logger.warning("remla.service is already active; skipping camera cycling to avoid disrupting service.")
-        return
+    # if remla_active:
+    #     logger.warning("remla.service is already active; skipping camera cycling to avoid disrupting service.")
+    #     return
 
     # load top-level settings and find current lab
     try:

@@ -1,0 +1,33 @@
+{
+    meta: {
+        timestamp: 123786,
+        version: "1.0.0",
+        messageId: "abc-123-def-456"
+        replyId: "xyz-789-ghi-012"|null
+    },
+    type: "queue"|"alert"|"debug"|"command"
+    payload: {
+       queue|command|alert|debug
+    }
+}
+
+queue: {
+    position:integer,
+}
+
+command: {
+    deviceName:string,
+    commandName:string,
+    parameters: {  
+        step: 15,
+        duration: 30
+    }
+}
+alert: {
+    title:string
+    message:string
+}
+
+debug: {
+    message:string
+}

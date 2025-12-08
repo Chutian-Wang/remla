@@ -35,14 +35,12 @@ def get_camera_logger() -> logging.Logger:
     Creates the logs directory if needed and ensures the handler isn't duplicated.
     """
     logger = logging.getLogger("remla.camera_cycle")
-    rprint("Making camera cycle logger")
     if not logger.handlers:
         handler = logging.FileHandler(logsDirectory / "camera_cycle.log")
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.setLevel(logging.DEBUG)
-    rprint("Camera cycle logger ready")
     return logger
 
 def is_package_installed(package_name):
@@ -239,7 +237,7 @@ After=network.target
 User={user}
 Group={user}
 WorkingDirectory={remoteLabsDirectory}
-ExecStart={executablePath} run {"-w" if echo else ""}
+ExecStart={executablePath} run {"-w" if echo else ""} -f
 ExecStartPre=/bin/sleep 5
 Restart=always
 Environment="PATH={binPath}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
@@ -291,9 +289,7 @@ def select_arducam_channel_index(index: int, bus: int = 1, control_pins: list | 
     Returns True on success.
     """
     logger = get_camera_logger()
-    rprint("Using camera logger")
     if index < 0 or index >= len(ARDUCAM_CHANNEL_BYTES):
-        warning("select_arducam_channel_index: invalid index %s", index)
         logger.error("select_arducam_channel_index: invalid index %s", index)
         return False
 
@@ -466,9 +462,9 @@ def get_boot_status() -> bool:
     """
     current_boot = int(psutil.boot_time())
     # If we've already run this boot, skip
-    boot_record = int(runMarker.read_text().strip())
     logger = get_camera_logger()
     if runMarker.exists():
+        boot_record = int(runMarker.read_text().strip())
         if boot_record != current_boot:
             logger.info("New boot detected (was %s, now %s)", boot_record, current_boot)
             runMarker.write_text(str(current_boot))
@@ -476,6 +472,9 @@ def get_boot_status() -> bool:
         else:
             logger.info("No new boot detected (still %s)", current_boot)
             return False
-    logger.error("Boot record file missing; assuming reboot.")
-    return True
+    else:
+        runMarker.mkdir(parents=True, exist_ok=True)
+        runMarker.write_text(str(current_boot))
+        logger.error("Boot record file missing; assuming reboot.")
+        return True
 

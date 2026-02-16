@@ -1716,6 +1716,7 @@ class S42CStepperMotor(BaseController):
         gearRatio=1,
         _pi=None,
         stepWaitTime=0,
+        delay = 0.0001
     ):
         super().__init__(name)
         self.EN = EN
@@ -1749,7 +1750,7 @@ class S42CStepperMotor(BaseController):
                     RuntimeWarning,
                 )
         self.refPoints = refPoints
-        self.delay = 0.0001
+        self.delay = delay
         self.mStep = microstep
         self.gearRatio = gearRatio
         self.stepWaitTime = stepWaitTime

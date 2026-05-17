@@ -205,6 +205,9 @@ def _nginx():
 
     shutil.copy(setupDirectory / "reader.js", websiteJSDirectory)
     shutil.copy(setupDirectory / "mediaMTXGetFeed.js", websiteJSDirectory)
+    websiteMockDirectory = websiteDirectory / "mock"
+    websiteMockDirectory.mkdir(parents=True, exist_ok=True)
+    shutil.copy(setupDirectory / "mock.html", websiteMockDirectory / "index.html")
 
     updateRemlaNginxConf(8080, hostname, 8675)
 
@@ -455,6 +458,26 @@ def _localip():
     return IP
 
 
+def _split_camel_case(value: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", " ", value).strip()
+
+
+def _lab_display_name(labSettings: dict, currentLabSettingsPath: Path) -> str:
+    if labSettings.get("name"):
+        return str(labSettings["name"])
+    if labSettings.get("title"):
+        return str(labSettings["title"])
+
+    websiteSettings = labSettings.get("website", {})
+    indexPath = websiteSettings.get("index")
+    if indexPath is not None:
+        parentName = Path(indexPath).parent.name
+        if parentName and parentName not in [".", "remoteLabs"]:
+            return _split_camel_case(parentName)
+
+    return _split_camel_case(currentLabSettingsPath.stem)
+
+
 def updateFinalInfo(template: Path) -> str:
     """
     Taks in a file reads it as text. Makes the substitutions of placeholders and give the contents of the file back as a string.
@@ -490,10 +513,16 @@ def run(
     foreground: Optional[bool] = typer.Option(
         False, "--foreground", "-f", help="Run in the foreground"
     ),
+    mock: Optional[bool] = typer.Option(
+        False,
+        "--mock",
+        help="Run with mock hardware controllers instead of real hardware.",
+    ),
     wstest: Optional[bool] = typer.Option(
         False, "--wstest", "-w", help="Runs echo test server"
     ),
 ):
+    mock = mock or os.environ.get("REMLA_MOCK_HARDWARE") == "1"
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print("#" * 80)
     print(f"########{now.center(64)}########")
@@ -532,14 +561,20 @@ def run(
         asyncio.get_event_loop().run_forever()
     elif not foreground:
         try:
+            if mock:
+                subprocess.run(["systemctl", "set-environment", "REMLA_MOCK_HARDWARE=1"], check=True)
+            else:
+                subprocess.run(["systemctl", "unset-environment", "REMLA_MOCK_HARDWARE"], check=False)
             subprocess.run(["systemctl", "start", "remla.service"], check=True)
-            success("Running remla in background!")
+            success("Running remla in background!" + (" Mock hardware is enabled." if mock else ""))
             subprocess.run(["systemctl", "restart", "mediamtx.service"], check=True)
         except subprocess.CalledProcessError as e:
             alert(f"Failed to start remla due to {e}")
             raise typer.Abort()
     else:
         print("Starting remla websocket server")
+        if mock:
+            warning("Mock hardware mode is enabled. No hardware drivers will be initialized.")
         typer.echo("Echo above statment")
         remlaSettingsPath = settingsDirectory / "settings.yml"
         # Check if the settings file exists
@@ -562,15 +597,20 @@ def run(
                 f"Device list not found in the lab settings file located at {currentLabSettingsPath}. Please update the file to include your list of devices."
             )
             raise typer.Abort()
+        labDisplayName = _lab_display_name(labSettings, currentLabSettingsPath)
 
         # Initialize devices from the lab settings
-        devices = createDevicesFromYml(labSettings["devices"])
+        devices = createDevicesFromYml(labSettings["devices"], mock=mock)
         print("Using devices:", labSettings["devices"])
         # Create and setup the experiment
         if admin:
-            experiment = Experiment("RemoteLabs", admin=True)
+            experiment = Experiment(
+                "RemoteLabs", admin=True, mock=mock, display_name=labDisplayName
+            )
         else:
-            experiment = Experiment("RemoteLabs")
+            experiment = Experiment(
+                "RemoteLabs", mock=mock, display_name=labDisplayName
+            )
 
         for device in devices.values():
             experiment.addDevice(device)

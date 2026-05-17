@@ -34,5 +34,6 @@ websiteStaticDirectory = websiteDirectory / "static"
 websiteJSDirectory = websiteStaticDirectory / "js"
 websiteCSSDirectory = websiteStaticDirectory / "css"
 websiteImgsDirectory = websiteStaticDirectory / "imgs"
+mockStatePort = 8676
 
 runMarker = settingsDirectory / "remla_camera_cycled" 

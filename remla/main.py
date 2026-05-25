@@ -478,6 +478,12 @@ def _lab_display_name(labSettings: dict, currentLabSettingsPath: Path) -> str:
     return _split_camel_case(currentLabSettingsPath.stem)
 
 
+def _write_service_mock_environment(mock: bool) -> None:
+    settingsDirectory.mkdir(parents=True, exist_ok=True)
+    value = "1" if mock else "0"
+    serviceEnvironmentPath.write_text(f"REMLA_MOCK_HARDWARE={value}\n")
+
+
 def updateFinalInfo(template: Path) -> str:
     """
     Taks in a file reads it as text. Makes the substitutions of placeholders and give the contents of the file back as a string.
@@ -528,17 +534,21 @@ def run(
     print(f"########{now.center(64)}########")
     print("#" * 80)
     print()
-    if status():
-        warning(
-            "Remla is already running. If you want to restart run `remla restart` or stop before running with new options."
-        )
-        raise typer.Abort()
-    signal.signal(signal.SIGTERM, lambda signum, frame: cleanupPID())
-    signal.signal(signal.SIGINT, lambda signum, frame: cleanupPID())
+    if foreground or wstest:
+        if status():
+            warning(
+                "Remla is already running. If you want to restart run `remla restart` or stop before running with new options."
+            )
+            raise typer.Abort()
+        signal.signal(signal.SIGTERM, lambda signum, frame: cleanupPID())
+        signal.signal(signal.SIGINT, lambda signum, frame: cleanupPID())
     # perform initial camera cycling once per boot (if configured)
-    cycle_camera = get_boot_status()
-    logger = get_camera_logger()
-    if cycle_camera:
+    if mock:
+        rprint("Skipping initial camera cycle because mock hardware mode is enabled.")
+    else:
+        cycle_camera = get_boot_status()
+        logger = get_camera_logger()
+    if not mock and cycle_camera:
         rprint("Performing initial camera cycle (per‑boot) before starting service...") 
         logger.info("""
         ##############################################################
@@ -546,7 +556,7 @@ def run(
         ##############################################################    
         """)
         cycle_initialize_cameras(timeout_per_camera=4)
-    else:
+    elif not mock:
         rprint("Skipping initial camera cycle (already performed this boot).")
     if wstest:
         print("Starting Echo Server")
@@ -561,10 +571,7 @@ def run(
         asyncio.get_event_loop().run_forever()
     elif not foreground:
         try:
-            if mock:
-                subprocess.run(["systemctl", "set-environment", "REMLA_MOCK_HARDWARE=1"], check=True)
-            else:
-                subprocess.run(["systemctl", "unset-environment", "REMLA_MOCK_HARDWARE"], check=False)
+            _write_service_mock_environment(mock)
             subprocess.run(["systemctl", "start", "remla.service"], check=True)
             success("Running remla in background!" + (" Mock hardware is enabled." if mock else ""))
             subprocess.run(["systemctl", "restart", "mediamtx.service"], check=True)
@@ -660,6 +667,7 @@ def stop():
 def status():
     # pidFilePathFull = pidFilePath.replace("<uid>", str(getCallingUserID()))
     print(pidFilePath)
+    stale_pid = False
     if os.path.exists(pidFilePath):
         # Read exisitng pid file
         with open(pidFilePath, "r") as file:
@@ -670,14 +678,23 @@ def status():
                 return True
             except ValueError:
                 typer.echo("PID File is corrupt. Starting a new instance.")
+                stale_pid = True
             except ProcessLookupError:
                 typer.echo("Remla instance not found. Staring new isntance")
+                stale_pid = True
             except PermissionError:
                 typer.echo("Permission denied when checking PID. Assuming its running.")
                 return True
     else:
         typer.echo("No PID file found. Starting new instance of remla")
 
+    if stale_pid:
+        try:
+            pidFilePath.unlink(missing_ok=True)
+        except PermissionError:
+            alert(f"Permission denied removing stale PID file at {pidFilePath}.")
+            raise typer.Abort()
+    pidFilePath.parent.mkdir(parents=True, exist_ok=True)
     with open(pidFilePath, "w+") as file:
         file.write(str(os.getpid()))
     return False
